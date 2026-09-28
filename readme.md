@@ -12,6 +12,7 @@ Production-ready Retrieval-Augmented Generation (RAG) chatbot for querying any d
 - SQLite persistent memory for multi-session chat history.
 - Redis semantic cache for repeated-query acceleration.
 - Multilingual query handling with Google Cloud Translation.
+- DeepEval 3-Level Evaluation Pipeline for component, pipeline, and application evaluation, safety benchmarking, and automated regression testing.
 - Source metadata and signed GCS document links in answers.
 - React frontend with New Chat, session switching, saved chat history, normal mode, and Deepthink mode.
 - Docker and Docker Compose setup for backend, frontend, Redis, Milvus, etcd, and MinIO.
@@ -29,6 +30,7 @@ Production-ready Retrieval-Augmented Generation (RAG) chatbot for querying any d
 | Storage Links | Google Cloud Storage signed URLs |
 | Persistent Memory | SQLite, sqlite-vec |
 | Semantic Cache | Redis Stack / RediSearch vector index |
+| Evaluation & Testing | DeepEval, PyTest |
 | Deployment | Docker, Docker Compose |
 
 ## High-Level Architecture
@@ -48,6 +50,8 @@ FastAPI Backend (localhost:5000)
         |
         +--> Language detection and translation
         |
+        +--> Security & Safety Guard (PII Masking, Prompt Injection/Jailbreak Check)
+        |
         +--> Gemini embedding generation
         |
         +--> Redis semantic cache lookup
@@ -59,6 +63,8 @@ FastAPI Backend (localhost:5000)
         +--> Google Discovery Engine reranking
         |
         +--> Gemini answer generation
+        |
+        +--> DeepEval Bridge Evaluation (Precision, Recall, Relevance, Faithfulness, Safety)
         |
         +--> GCS signed source URLs
         |
@@ -75,6 +81,17 @@ FastAPI Backend (localhost:5000)
 |-- requirements.txt                     # Python dependencies
 |-- config/
 |   `-- config.yaml                      # LLM and embedding model config
+|-- evaluation_pipeline/                 # DeepEval 3-Level Evaluation Pipeline
+|   |-- config.py                        # Model settings & evaluation thresholds
+|   |-- deepeval_wrapper.py              # DeepEval LLMTestCase & metric adapters
+|   |-- dataset_generator.py             # Golden dataset manager & synthetic QnA generator
+|   |-- datasets/                        # Golden & safety datasets
+|   |   |-- golden_dataset.json
+|   |   `-- safety_test_suite.json
+|   |-- component_eval.py                # Level (a): Retriever & Generator isolation evals
+|   |-- pipeline_eval.py                 # Level (b): End-to-End RAG pipeline evals
+|   |-- app_eval.py                      # Level (c): App quality, safety & operational evals
+|   `-- runner.py                        # Regression testing CLI orchestrator & reports
 |-- src/
 |   |-- step_1_chunking.py               # Chunking utilities
 |   |-- step_2_embedding.py              # Embedding logic
@@ -83,7 +100,15 @@ FastAPI Backend (localhost:5000)
 |   |-- step_5_prompt.py                 # Prompt template
 |   |-- step_6_reranker.py               # Google Discovery Engine reranker
 |   |-- step_7_utility.py                # Output utility helpers
-|   `-- step_8_session_history.py        # Recent session history loader
+|   |-- step_8_session_history.py        # Recent session history loader
+|   `-- pipeline/                        # RAG Enterprise Guards & Evaluation Bridge
+|       |-- security.py                  # PII Masking & Prompt Injection Detection
+|       |-- evaluation.py                # Bridge connecting main app to evaluation_pipeline
+|       |-- validator.py                 # Structural & Output Schema Validation
+|       |-- circuit_breaker.py           # Resiliency & Fallback Circuit Breaker
+|       |-- cost_governance.py           # Cost Tracking & Token Usage Manager
+|       |-- rate_limiter.py              # API Request Rate Limiter
+|       `-- monitoring.py                # Telemetry & LangSmith Tracer
 |-- milvus_database/
 |   |-- config.py                        # Milvus collection and connection config
 |   |-- factory_client.py                # Milvus client factory
@@ -134,15 +159,56 @@ Example `/query` payload:
 1. User creates or opens a chat session from the React frontend.
 2. Frontend sends the question, answer mode, and `session_id` to `/query`.
 3. Backend detects language and translates non-English queries to English.
-4. Gemini embedding model converts the query into a vector.
-5. Redis semantic cache checks for a high-similarity previous answer.
-6. SQLite semantic memory checks persisted historical answers.
-7. If no cache hit is found, Milvus retrieves relevant document chunks.
-8. Google Discovery Engine reranks retrieved chunks.
-9. Gemini generates a structured JSON answer using the retrieved context and recent session history.
-10. Backend enriches the response with metadata and signed GCS source URLs.
-11. User and assistant messages are saved to SQLite chat history.
-12. High-value answers are cached in Redis for faster future responses.
+4. Security guard sanitizes input and checks for prompt injection or jailbreak patterns.
+5. Gemini embedding model converts the query into a vector.
+6. Redis semantic cache checks for a high-similarity previous answer.
+7. SQLite semantic memory checks persisted historical answers.
+8. If no cache hit is found, Milvus retrieves relevant document chunks.
+9. Google Discovery Engine reranks retrieved chunks.
+10. Gemini generates a structured JSON answer using the retrieved context and recent session history.
+11. DeepEval evaluation bridge evaluates the query, answer, and context across precision, recall, relevance, faithfulness, and safety.
+12. Backend enriches the response with metadata and signed GCS source URLs.
+13. User and assistant messages are saved to SQLite chat history.
+14. High-value answers are cached in Redis for faster future responses.
+
+## Evaluation Pipeline & Regression Testing
+
+The evaluation framework is located in `evaluation_pipeline/` outside the `src` folder. It uses **DeepEval** to assess the application across 3 distinct levels:
+
+### Level (a): Component-Level Evaluation (`component_eval.py`)
+- **Retriever Component**: Evaluated independently on `precision@k` and `recall@k` against ground truth context chunks.
+- **Generator Component**: Evaluated in isolation on custom QnA golden datasets for:
+  - **Faithfulness / Hallucination Detection**
+  - **Answer Relevance**
+  - **Citation / Reference Alignment**
+  - **Reference-Free LLM Judge** (`GEval`)
+
+### Level (b): Pipeline-Level Evaluation (`pipeline_eval.py`)
+- Evaluates the end-to-end RAG response using mandatory metrics:
+  - **Answer Relevance** (`AnswerRelevancyMetric`)
+  - **Context Relevance** (`ContextualRelevancyMetric` / `ContextualPrecisionMetric`)
+  - **Faithfulness** (`FaithfulnessMetric`)
+
+### Level (c): Application-Level Evaluation (`app_eval.py`)
+- Evaluates full application performance across 5 dimensions:
+  - **Correctness**: Factual alignment (`GEval`)
+  - **Completeness**: Response detail depth (`GEval`)
+  - **Style**: Tone, grammar, and structural formatting (`GEval`)
+  - **Safety Evals**:
+    - **Toxicity**: DeepEval `ToxicityMetric`
+    - **PII Injection**: Automated masking & leakage detection via `security_guard`
+    - **Jailbreaks**: Prompt injection heuristic pattern detection
+  - **Operational Evals**: Latency (ms), Cost (USD), and Token consumption
+
+### Running Regression Testing
+
+To run the complete regression test suite across golden datasets and generate a detailed report:
+
+```bash
+python -m evaluation_pipeline.runner
+```
+
+Report files are saved in `evaluation_pipeline/reports/eval_report_<timestamp>.json`.
 
 ## Memory and Caching
 
@@ -210,6 +276,7 @@ Create a `.env` file in the project root. Do not commit real secrets.
 GOOGLE_API_KEY=your-google-api-key
 MILVUS_HOST=standalone
 MILVUS_PORT=19530
+DEEPEVAL_LLM_MODEL=gpt-4o-mini
 ```
 
 Docker Compose also sets:
@@ -305,5 +372,6 @@ This mode is useful for complex domain questions that require deeper document gr
   - Cloud Translation
   - Discovery Engine ranking
   - Cloud Storage
+
 
 

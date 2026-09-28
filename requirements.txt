@@ -37,3 +37,8 @@ PyYAML
 
 # Language Detection
 langdetect
+
+# Evaluation, Testing & Benchmarking
+deepeval>=4.0.0
+pytest
+
