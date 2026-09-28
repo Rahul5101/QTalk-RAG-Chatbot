@@ -3,60 +3,49 @@ from google.oauth2 import service_account
 import re
 import os
 from dotenv import load_dotenv
+
 load_dotenv()
 
 SERVICE_ACCOUNT_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "service-account.json")
 
-if not os.path.isfile(SERVICE_ACCOUNT_PATH):
-    raise RuntimeError("Service account file missing")
-
-creds = service_account.Credentials.from_service_account_file(
-    SERVICE_ACCOUNT_PATH
-)
-
-
-translate_client = translate.Client(credentials=creds)
+translate_client = None
+if os.path.isfile(SERVICE_ACCOUNT_PATH):
+    try:
+        creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_PATH)
+        translate_client = translate.Client(credentials=creds)
+    except Exception as exc:
+        print(f"⚠️ Google Translate client init warning: {exc}")
 
 
 def translation(detected_lang, user_query):
-    # Translate non-English query to English
-    if detected_lang != "en":
+    if not user_query:
+        return ""
+    # Translate non-English query to English if client is available
+    if detected_lang != "en" and translate_client is not None:
         try:
-            translation = translate_client.translate(user_query, target_language="en")
-            user_query = translation.get("translatedText", user_query)
-            # print("query: ",user_query)
-            return user_query
+            result = translate_client.translate(user_query, target_language="en")
+            return result.get("translatedText", user_query)
         except Exception as e:
-            print(f"[Translation Error] {e}")  # Replace with logger.error
-    
-    else:
-        return user_query
-    
-
-# def output_converison(response,target_language):
-#     translated_response = translate_client.translate(response, target_language=target_language)
-#     translated_response = translated_response.get("translatedText", translated_response)
-
-#     return translated_response
-
-
+            print(f"[Translation Error] {e}. Falling back to raw user query.")
+            return user_query
+    return user_query
 
 
 def output_converison(text, targeted_language):
-    if targeted_language and targeted_language.strip():
+    if not text:
+        return ""
+    if targeted_language and targeted_language.strip() and translate_client is not None:
         try:
-            # Use a less "natural" placeholder that is unlikely to be altered
             placeholder = "__[[[LINE_BREAK]]]__"
             text_with_placeholders = text.replace("\n", placeholder)
 
-            translation = translate_client.translate(
+            result = translate_client.translate(
                 text_with_placeholders,
                 target_language=targeted_language
             )
 
-            translated_text = translation['translatedText']
+            translated_text = result['translatedText']
 
-            # Normalize potential placeholder variants before restoring newlines
             translated_text = re.sub(
                 r'[_\s\[\]]*LINE[\s_]*BREAK[_\s\[\]]*',
                 placeholder,
@@ -64,10 +53,8 @@ def output_converison(text, targeted_language):
                 flags=re.IGNORECASE
             )
 
-            # Replace placeholders with actual newlines
             text = translated_text.replace(placeholder, "\n")
 
         except Exception as e:
-            print("Translation failed:", str(e))
+            print(f"Translation output failed: {e}")
     return text
-

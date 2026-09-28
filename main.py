@@ -15,10 +15,24 @@ from fastapi.responses import FileResponse
 # from data_cleaning.markdown_cleaning import process_all_files
 # from drop_collection import drop_collection_from_milvus
 
+# Enterprise RAG Security, Monitoring, Evaluation, and Resilience Pipeline
+from src.pipeline import (
+    security_guard,
+    RateLimitMiddleware,
+    llm_circuit_breaker,
+    milvus_circuit_breaker,
+    CircuitBreakerOpenException,
+    cost_manager,
+    output_validator,
+    rag_evaluator,
+    metrics_registry,
+    langsmith_tracer
+)
+
 BASE_DIR = os.getcwd()
 app = FastAPI()
 
-
+app.add_middleware(RateLimitMiddleware)
 
 origins = [
     origin.strip()
@@ -36,6 +50,7 @@ app.add_middleware(
     allow_methods=["*"],              # Allow all HTTP methods
     allow_headers=["*"],              # Allow all headers
 )
+
 
 
 # Request model: user sends a question
@@ -344,46 +359,142 @@ def list_sessions(db: Session = Depends(get_db)):
 
 #
 
+@app.get("/metrics")
+def get_metrics():
+    """
+    Exposes live system metrics: latency, throughput, token usage, costs, cache hit/miss, security.
+    """
+    return metrics_registry.get_metrics_snapshot()
+
 db_load = loading_milvus() 
-# db: Session = Depends(get_db)
+
 @app.post("/query", response_model=AnswerResponse)
-async def answer_question(request: QuestionRequest,db: Session = Depends(get_db)):
+async def answer_question(request: QuestionRequest, db: Session = Depends(get_db)):
+    start_time = time.time()
     user_question = request.question
     answer_type = request.answer_type
     session_id = request.session_id
-    start_time = time.time()
 
-    detected_lang = detect_language(user_question)
-    translate_query = translation(detected_lang=detected_lang, user_query=user_question)
+    # 1. Security Check: Input Sanitization
+    sanitized_question = security_guard.sanitize_input(user_question)
 
-    # 2. Just call the main logic
-    # Make sure 'main' and 'process_file' do NOT contain 'asyncio.run'
-    response_data = await main(
-        query=translate_query, 
-        db = db,
-        session_id=session_id, 
-        answer_type=answer_type
-    )
+    # 2. Security Check: Prompt Injection Defense
+    is_injected, injection_pattern = security_guard.check_prompt_injection(sanitized_question)
+    if is_injected:
+        metrics_registry.record_security(blocked=True)
+        metrics_registry.record_request(latency_ms=(time.time() - start_time) * 1000, is_error=True)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Security alert: Prompt injection or jailbreak pattern detected ('{injection_pattern}'). Request blocked."
+        )
 
-    response_payload = response_data[0] if isinstance(response_data, tuple) else response_data
+    # 3. Security Check: PII Masking on Input
+    masked_query, input_pii_counts = security_guard.mask_pii(sanitized_question)
+    total_pii_found = sum(input_pii_counts.values())
+    if total_pii_found > 0:
+        metrics_registry.record_security(pii_count=total_pii_found)
 
-    db.add(ChatMessage(
-        session_id=session_id,
-        role="user",
-        response=user_question,
-    ))
-    db.add(ChatMessage(
-        session_id=session_id,
-        role="assistant",
-        response=response_payload.get("response", "") if isinstance(response_payload, dict) else str(response_payload),
-        bold_words=json.dumps(response_payload.get("bold_words", [])) if isinstance(response_payload, dict) else None,
-        meta_data=json.dumps(response_payload.get("meta_data", [])) if isinstance(response_payload, dict) else None,
-        follow_up=response_payload.get("follow_up") if isinstance(response_payload, dict) else None,
-        table_data=json.dumps(response_payload.get("table_data", [])) if isinstance(response_payload, dict) else None,
-        ucid=response_payload.get("ucid") if isinstance(response_payload, dict) else None,
-    ))
-    db.commit()
-    
-    elapsed_time = time.time() - start_time
-    print(f"\nTotal time consumed: {elapsed_time:.2f} seconds")
-    return JSONResponse(response_payload)
+    # 4. Cost Governance: Token & Budget Check
+    input_tokens = cost_manager.estimate_tokens(masked_query)
+    routed_model = cost_manager.route_model(masked_query)
+
+    try:
+        # 5. Multilingual Translation
+        detected_lang = detect_language(masked_query)
+        translate_query = translation(detected_lang=detected_lang, user_query=masked_query)
+
+        # 6. Execute RAG Main Logic
+        response_data = await main(
+            query=translate_query,
+            db=db,
+            session_id=session_id,
+            answer_type=answer_type
+        )
+
+        response_payload = response_data[0] if isinstance(response_data, tuple) else response_data
+
+        # Ensure dictionary response
+        if not isinstance(response_payload, dict):
+            response_payload = {"response": str(response_payload), "confidence_score": 0.5}
+
+        raw_response_text = response_payload.get("response", "")
+
+        # 7. Output Security: PII Masking on Output
+        masked_response_text, output_pii_counts = security_guard.mask_pii(raw_response_text)
+        response_payload["response"] = masked_response_text
+        if sum(output_pii_counts.values()) > 0:
+            metrics_registry.record_security(pii_count=sum(output_pii_counts.values()))
+
+        # 8. Token & Cost Calculation
+        output_tokens = cost_manager.estimate_tokens(masked_response_text)
+        request_cost_usd = cost_manager.calculate_cost(routed_model, input_tokens, output_tokens)
+        cost_manager.check_budget_and_record(request_cost_usd)
+
+        # 9. RAG Evaluation Metrics (Recall, Precision, Relevance, Hallucination)
+        retrieved_snippets = []
+        meta_data_list = response_payload.get("meta_data", [])
+        if isinstance(meta_data_list, str):
+            try:
+                meta_data_list = json.loads(meta_data_list)
+            except Exception:
+                meta_data_list = []
+        if isinstance(meta_data_list, list):
+            for m in meta_data_list:
+                if isinstance(m, dict) and "text" in m:
+                    retrieved_snippets.append(m["text"])
+
+        eval_results = rag_evaluator.run_full_evaluation(
+            query=translate_query,
+            answer=masked_response_text,
+            retrieved_chunks=retrieved_snippets
+        )
+        response_payload["evaluation_metrics"] = eval_results
+
+        # 10. Record Metrics & Telemetry
+        elapsed_ms = (time.time() - start_time) * 1000
+        metrics_registry.record_request(latency_ms=elapsed_ms, is_error=False)
+        metrics_registry.record_tokens(input_tokens, output_tokens, request_cost_usd)
+
+        # 11. LangSmith Trace Logging
+        langsmith_tracer.log_trace_metadata(
+            run_id=session_id,
+            name="RAG_Query_Execution",
+            metadata={
+                "inputs": {"question": masked_query},
+                "outputs": response_payload,
+                "cost_usd": request_cost_usd,
+                "eval_results": eval_results,
+                "latency_ms": elapsed_ms
+            },
+            tags=["rag", routed_model, "sanitized"]
+        )
+
+        # Save to DB
+        db.add(ChatMessage(
+            session_id=session_id,
+            role="user",
+            response=user_question,
+        ))
+        db.add(ChatMessage(
+            session_id=session_id,
+            role="assistant",
+            response=response_payload.get("response", ""),
+            bold_words=json.dumps(response_payload.get("bold_words", [])) if isinstance(response_payload.get("bold_words"), list) else None,
+            meta_data=json.dumps(response_payload.get("meta_data", [])) if isinstance(response_payload.get("meta_data"), list) else None,
+            follow_up=response_payload.get("follow_up"),
+            table_data=json.dumps(response_payload.get("table_data", [])) if isinstance(response_payload.get("table_data"), list) else None,
+            ucid=response_payload.get("ucid"),
+        ))
+        db.commit()
+
+        print(f"\nQuery completed in {elapsed_ms:.2f} ms | Cost: ${request_cost_usd:.6f} | Eval Overall Score: {eval_results['overall_score']}")
+        return JSONResponse(response_payload)
+
+    except Exception as exc:
+        elapsed_ms = (time.time() - start_time) * 1000
+        metrics_registry.record_request(latency_ms=elapsed_ms, is_error=True)
+        if isinstance(exc, HTTPException):
+            raise exc
+        print(f"Error processing query: {exc}")
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(exc)}")
+

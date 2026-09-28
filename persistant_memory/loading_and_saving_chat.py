@@ -7,12 +7,24 @@ import struct
 import os
 
 def _sqlite_path_from_env():
-    database_url = os.getenv("DATABASE_URL")
+    database_url = os.getenv("DATABASE_URL", "chat_history.db")
     if database_url and database_url.startswith("sqlite:///"):
-        return database_url.replace("sqlite:///", "", 1)
-    return os.path.join(os.getcwd(), "chat_history.db")
+        path = database_url.replace("sqlite:///", "", 1)
+        db_path = os.path.abspath(path)
+    else:
+        db_path = os.path.abspath("chat_history.db")
+
+    # If Docker created a directory by mistake on host volume mount, remove it
+    if os.path.exists(db_path) and os.path.isdir(db_path):
+        try:
+            os.rmdir(db_path)
+        except Exception:
+            pass
+
+    return db_path
 
 DB_PATH = _sqlite_path_from_env()
+
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)

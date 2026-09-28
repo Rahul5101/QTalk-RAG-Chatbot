@@ -1,28 +1,33 @@
-# LangChain Core and Community
+# LangChain Core, Community, and Telemetry
 langchain>=0.3.0
 langchain-community>=0.3.0
 langchain-core>=0.3.0
+langsmith>=0.1.0
 
-# Google AI Integration (Use this instead of generic 'google')
+# Google AI Integration
 langchain-google-genai==2.1.9
 google-cloud-translate
 google-cloud-storage
 google-cloud-discoveryengine
 google-cloud-aiplatform
 
-# Database
+# Database & Caching
 pymilvus
 SQLAlchemy>=2.0.0
+redis
+sqlite_vec
 numpy>=1.26.0
 requests>=2.32.0
 
-# PDF and Image Processing
+# PDF and Document Processing
 PyMuPDF
 pypdf
 pillow
 tqdm
+reportlab
+python-docx
 
-# API and Server
+# API, Server & Pipeline Security
 fastapi
 uvicorn
 gunicorn
@@ -32,10 +37,3 @@ PyYAML
 
 # Language Detection
 langdetect
-
-pathlib
-
-redis
-reportlab
-python-docx
-sqlite_vec

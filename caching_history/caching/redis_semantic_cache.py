@@ -10,40 +10,33 @@ from persistant_memory.loading_and_saving_chat import get_top_k_queries
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 embedding_model = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
 
-REDIS_HOST = "localhost"
-REDIS_PORT = 6379
+INDEX_NAME = "idx:semantic"
+KEY_PREFIX = "semantic:"
+EMBED_FIELD = "embedding"
+DIM = int(os.getenv("DIM", 3072))
+THRESHOLD = float(os.getenv("THRESHOLD", 0.98))
+DEFAULT_K = 3
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("semantic-cache")
 
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 
+def _init_redis_client():
+    hosts = [REDIS_HOST, "localhost", "127.0.0.1"]
+    for host in hosts:
+        try:
+            client = redis.Redis(host=host, port=REDIS_PORT, decode_responses=False, socket_timeout=2.0)
+            client.ping()
+            return client
+        except Exception:
+            continue
+    return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=False, socket_timeout=2.0)
+
+r = _init_redis_client()
 
 
-INDEX_NAME = "idx:semantic"
-KEY_PREFIX = "semantic:"       # each cached item will be stored as HASH semantic:<id>
-EMBED_FIELD = "embedding"      # the vector field name in index
-DIM = int(os.getenv("DIM",3072))         # set this to your embedding dimension                                     
-THRESHOLD = float(os.getenv("THRESHOLD",0.98)) # 98% similarity threshold       
-# EMBEDDING_API = os.getenv("EMBEDDING_API")
-DEFAULT_K = 3
-
-print("THRESHOLD: ",THRESHOLD)
-# -------------------------
-# Config
-# -------------------------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("semantic-cache")
-
-
-
-def embd_model(query):
-    res = embedding_model.embed_query(query)
-    return res
-    # return [1,4,6,7,3,5,6]
-
-# -------------------------
-# Clients & model
-# -------------------------
-r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=False)
 
 
 # -------------------------
@@ -94,32 +87,36 @@ def dot_similarity_normalized(a: np.ndarray, b: np.ndarray) -> float:
 def create_index_if_not_exists(dim: int = DIM):
     """Create RediSearch HNSW index configured for VECTOR FLOAT32 COSINE."""
     try:
-        r.execute_command("FT.INFO", INDEX_NAME)
-        logger.info("Index already exists: %s", INDEX_NAME)
-        return
-    except redis.exceptions.ResponseError:
-        logger.info("Creating index: %s", INDEX_NAME)
+        try:
+            r.execute_command("FT.INFO", INDEX_NAME)
+            logger.info("Index already exists: %s", INDEX_NAME)
+            return
+        except redis.exceptions.ResponseError:
+            logger.info("Creating index: %s", INDEX_NAME)
 
-    cmd = [
-        "FT.CREATE", INDEX_NAME,
-        "ON", "HASH",
-        "PREFIX", "1", KEY_PREFIX,
+        cmd = [
+            "FT.CREATE", INDEX_NAME,
+            "ON", "HASH",
+            "PREFIX", "1", KEY_PREFIX,
 
-        "SCHEMA",
-            "query", "TEXT",
-            "answer", "TEXT",
+            "SCHEMA",
+                "query", "TEXT",
+                "answer", "TEXT",
 
-            # Vector field (all params inside schema)
-            EMBED_FIELD, "VECTOR", "HNSW", "10",
-                "TYPE", "FLOAT32",
-                "DIM", str(dim),
-                "DISTANCE_METRIC", "COSINE",
-                "M", "16",
-                "EF_CONSTRUCTION", "200"
-    ]
+                # Vector field (all params inside schema)
+                EMBED_FIELD, "VECTOR", "HNSW", "10",
+                    "TYPE", "FLOAT32",
+                    "DIM", str(dim),
+                    "DISTANCE_METRIC", "COSINE",
+                    "M", "16",
+                    "EF_CONSTRUCTION", "200"
+        ]
 
-    res = r.execute_command(*cmd)
-    logger.info("Index created: %s", res)
+        res = r.execute_command(*cmd)
+        logger.info("Index created: %s", res)
+    except Exception as exc:
+        logger.warning(f"⚠️ Redis semantic cache index creation skipped: {exc}")
+
 
 
 # -------------------------
