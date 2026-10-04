@@ -64,8 +64,6 @@ FastAPI Backend (localhost:5000)
         |
         +--> Gemini answer generation
         |
-        +--> DeepEval Bridge Evaluation (Precision, Recall, Relevance, Faithfulness, Safety)
-        |
         +--> GCS signed source URLs
         |
         +--> Save response to SQLite memory and chat history
@@ -101,9 +99,8 @@ FastAPI Backend (localhost:5000)
 |   |-- step_6_reranker.py               # Google Discovery Engine reranker
 |   |-- step_7_utility.py                # Output utility helpers
 |   |-- step_8_session_history.py        # Recent session history loader
-|   `-- pipeline/                        # RAG Enterprise Guards & Evaluation Bridge
+|   `-- pipeline/                        # RAG Enterprise Guards & Operational Middleware
 |       |-- security.py                  # PII Masking & Prompt Injection Detection
-|       |-- evaluation.py                # Bridge connecting main app to evaluation_pipeline
 |       |-- validator.py                 # Structural & Output Schema Validation
 |       |-- circuit_breaker.py           # Resiliency & Fallback Circuit Breaker
 |       |-- cost_governance.py           # Cost Tracking & Token Usage Manager

@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse
 # from data_cleaning.markdown_cleaning import process_all_files
 # from drop_collection import drop_collection_from_milvus
 
-# Enterprise RAG Security, Monitoring, Evaluation, and Resilience Pipeline
+# Enterprise RAG Security, Monitoring, and Resilience Pipeline
 from src.pipeline import (
     security_guard,
     RateLimitMiddleware,
@@ -24,7 +24,6 @@ from src.pipeline import (
     CircuitBreakerOpenException,
     cost_manager,
     output_validator,
-    rag_evaluator,
     metrics_registry,
     langsmith_tracer
 )
@@ -430,32 +429,12 @@ async def answer_question(request: QuestionRequest, db: Session = Depends(get_db
         request_cost_usd = cost_manager.calculate_cost(routed_model, input_tokens, output_tokens)
         cost_manager.check_budget_and_record(request_cost_usd)
 
-        # 9. RAG Evaluation Metrics (Recall, Precision, Relevance, Hallucination)
-        retrieved_snippets = []
-        meta_data_list = response_payload.get("meta_data", [])
-        if isinstance(meta_data_list, str):
-            try:
-                meta_data_list = json.loads(meta_data_list)
-            except Exception:
-                meta_data_list = []
-        if isinstance(meta_data_list, list):
-            for m in meta_data_list:
-                if isinstance(m, dict) and "text" in m:
-                    retrieved_snippets.append(m["text"])
-
-        eval_results = rag_evaluator.run_full_evaluation(
-            query=translate_query,
-            answer=masked_response_text,
-            retrieved_chunks=retrieved_snippets
-        )
-        response_payload["evaluation_metrics"] = eval_results
-
-        # 10. Record Metrics & Telemetry
+        # 9. Record Metrics & Telemetry
         elapsed_ms = (time.time() - start_time) * 1000
         metrics_registry.record_request(latency_ms=elapsed_ms, is_error=False)
         metrics_registry.record_tokens(input_tokens, output_tokens, request_cost_usd)
 
-        # 11. LangSmith Trace Logging
+        # 10. LangSmith Trace Logging
         langsmith_tracer.log_trace_metadata(
             run_id=session_id,
             name="RAG_Query_Execution",
@@ -463,7 +442,6 @@ async def answer_question(request: QuestionRequest, db: Session = Depends(get_db
                 "inputs": {"question": masked_query},
                 "outputs": response_payload,
                 "cost_usd": request_cost_usd,
-                "eval_results": eval_results,
                 "latency_ms": elapsed_ms
             },
             tags=["rag", routed_model, "sanitized"]
@@ -487,7 +465,7 @@ async def answer_question(request: QuestionRequest, db: Session = Depends(get_db
         ))
         db.commit()
 
-        print(f"\nQuery completed in {elapsed_ms:.2f} ms | Cost: ${request_cost_usd:.6f} | Eval Overall Score: {eval_results['overall_score']}")
+        print(f"\nQuery completed in {elapsed_ms:.2f} ms | Cost: ${request_cost_usd:.6f}")
         return JSONResponse(response_payload)
 
     except Exception as exc:
